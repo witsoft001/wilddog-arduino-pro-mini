@@ -1,0 +1,276 @@
+[摘]DTLS主要特性概述和实现分析 (2013-01-07 09:01:43)转载▼
+标签： 杂谈	分类： 软件技术
+1. DTLS简介 
+1.1 引言 
+
+近年来出现了许多实用数据报传输的应用程序。这些应用包括实时视频会议，internet电话和在线游戏，比如Quack和Startcraft。这些应用都是延迟敏感的，并且使用了不可靠的数据报传输。TCP之上的应用可以用TLS来保证安全，但是TLS不能用来保证UDP的安全。Datagram TLS试图在现存的TLS协议架构上提出扩展，使之支持UDP，即成为TLS的一个支持数据报传输的版本。 
+
+1.2 基础： TLS简介 
+TLS是最为广泛部署的协议，它用来保障网络安全通信。TLS用来保护Web 通信和email协议（诸如IMAP，POP）。TLS的主要优势是它通过向应用层和网络层之间（即OSI模型中的会话层）插入TLS来保证应用的安全。然而，TLS要求一个可靠的传输信道—典型的是TCP—因此不能用来保证数据报通信的安全。 
+
+当部署TLS的时候，大家还没有充分认识到这个局限性的严重程度，因为当时大多数应用运行在TCP之上。即使今天也是这样。然而情况正在改变。在过去几年中，不断增长的应用层协议，比如SIP  (session initial protocol)，RTP (real time protocol), MGCP (the Media Gateway Control Protocol)，还有许多游戏协议都基于UDP传输而设计。 
+
+目前，这些应用的设计者面对着许多用来保证安全性的选择，但却无法令人满意。首先，他们可以使用IPsec。然而，IPsec不适合于Client-Server应用模型，且难以同应用程序结合，因为IPsec运行在系统内核。有很多文献详细讨论了为什么IPsec为什么不是一个令人满意的选择。其次，他们自己设计一个特有的应用层安全协议。例如，SIP使用了S/MIME的一个变体来保证安全通信。将S/MIME嫁接到SIP中比使用TLS上的TCP版本的SIP变体更费尽。第三，可以把应用移植到TCP之上，然后使用TLS。不幸的是，许多这样的应用依赖于UDP语义，当运行在诸如TCP之类的流协议上性能将无法令人接受。 
+
+最为明显的选择是设计一个通用的信道安全协议，它可以使用数据报传输，就像TCP上的TLS。这样一个协议可以在用户空间中实现，这样便于安装，但是要足够灵活和通用，能够许多面向数据报的应用程序提供安全。尽管认为这个方案将是一个巨大和困难的规划项目。但是构造一个可以工作的协议相当直接，尤其是有了TLS的起点和IPsec的参考。本文介绍了这个新的协议，我们称为 “Datagram TLS “, DTLS是TLS的一个修改版本， 这样函数能够运行在数据报通信上。相对于上面的方案，该方法有两个主要优势：首先，既然DTLS非常类似于TLS，可以重用以前的协议架构和实现方法。为了便于展示，我们通过对OpenSSL库的添加实现了DTLS。我们总共添加了7000行代码，其中的60%从OpenSSL剪切和粘贴。其次，既然DTLS向通用安全层提供了相似的接口，就易于调整协议来使用它。TLS的经验显示，这种易于调整性是扩大部署的关键。 
+
+总结一下，TLS不能用以保证数据报安全的原因。 
+（1） TLS纪录层不能处理独立纪录。因为加密的上下文（比如CBC状态，序列密钥流）在记录之间经过链接。如果其中一个记录丢失，则将不能处理其后的所有记录。 
+（2） TLS握手层消息必须可靠而不能丢失。通过一个MAC字段来提供反重放和信息记录保护，其中，MAC中包含序列号，但是序列号被隐含在记录中。 
+
+
+1.3设计概述 
+DTLS的目标应用主要是C/S及其变体。这也是TLS的设计目标并且已很好工作。展示的安全模型中，server通过DNS名称和IP地址被认证，Client是匿名的或者被其他形式认证，典型的是在应用层通过用户名/密码来处理。 
+这个实现并不真正安全。然而，应用程序的设计者们，向在添加安全性的时候尽量能够维护他们的协议和实现架构。这个实现制造了一个类似于TLS或IPsec的有吸引力的信道安全协议，因为改动之非常小。从这个观点看来，理想的数据报信道安全协议应该取代对Server的DNS和基于IP认证的 强加密认证，而是把client认证留给应用层协议。
+1.4 DTLS必须满足的特点 
+
+可靠会话建立 DTLS必须提供一个机制来认证对端，进行可靠密钥建立、算法协商合参数传递。既然DTLS完全运行在不可靠的数据报通信之上，必须实现重传机制来保证握手信息的可靠传递。然而，重传机制必须简单和轻量，能够尽量使得DTLS的可移植。注意，要求创建一个会话意思是DTLS是适合于长期的“面向连接的“协议，而不是类似于DNS的完全无连接。无连接协议最好应用层的对象安全协议提供。 
+安全服务 DTLS必须保证数据传输的机密性和完整性，能够检测出被替代的数据包。 
+易于部署 在用户空间中实现，不依赖于操作系统。 
+语义 借鉴TLS的优点，DTLS的语义应该模仿UDP语义，其借口模仿UDP API。 
+最小的改动 由于T:LS已经非常鲁棒和成熟，DTLS通过集成TLS的特性能够确立鲁棒性。最小化改动还能够减少引入未知脆弱性的可能性。 
+
+
+1.5 DTLS未解决的问题 
+这个可能是最容易被误解的。 
+DTLS协议用来保证通信应用程序之间的数据安全性。它被设计来运行在应用程序空间，不要求任何内核修改。 数据报传输不提供和要求可靠或顺序的数据发送。DTLS协议保留了载荷数据的该特性。诸如多媒体流，Internet电话和在线游戏等应用，因为考虑到传输数据的延迟敏感性而采用数据报传输来通信。在应用DTLS来保证通信安全性之后，该类应用的特点并未改动，因为DTLS协议不是为了解决数据丢失和数据乱序而诞生的。也就是说，DTLS协议并不能解决数据在传输过程中的丢失和乱序等问题。 
+
+1.6 新机制 
+先来看下这些问题在IPsec中是如何解决的：对每条记录添加显式状态。TLS1.1中已经提出了这个方案，即对每条TLS记录添加显式CBC状态。DTLS借鉴了这些机制，并且添加了对显式序列号的支持。这就解决了上面的第一个问题。 
+
+由于TLS握手消息是有步骤的加密握手。消息必须按照定义好的顺序传输和接收，任何一步没有跟上步调都会导致握手失败。显然，在消息丢失或错误时，即使重传也不能解决这个问题。另外，TLS握手消息比任何数据包都要大，这就使得数据分片难以进行。DTLS对这个问题作了修正。 
+
+DTLS使用简单重传时间来处理数据包丢失。下图展示了DTLS握手第一步的基本概念： 
+      Client                                   Server 
+      ------                                   ------ 
+      ClientHello           ------> 
+
+                              X<-- HelloVerifyRequest 
+                                               (lost) 
+
+      [Timer Expires] 
+
+      ClientHello           ------> 
+      (重传) 
+
+一旦client传输clientHello消息完毕，就等待接收来自server的HelloVerifyRequest。如果server方发送的消息丢失，client就知道clientHello或HelloVerifyRequest丢失了，必须进行重传。当server收到重传的消息时，它必须重传自身发送的HelloVerifyRequest。这里，需要维护一个重传时间，当超时时进行重传。 
+注意：server方不主动进行超时和重传，因为这样需要维护多个client的状态，会严重加重服务器的负担。 
+
+
+1.6.1 
+重传：在DTLS中，每条握手记录都被赋予一个特殊的序列号（原话，还没看出来哪里特殊）。当一个对端收到一条握手消息时，能够很快的判断该消息是否期望的消息。如果是，处理之。否则，就把它放入队列中直到前面的消息接收完毕再处理。 
+
+1.6.2 
+消息大小：TLS和DTLS握手消息可能非常大，理论上可达2^24-1 byte,实际上也常常在几KB左右。然而，UDP数据包通常不能大于1500 byte（如果不允许分片处理的话）。因为这个限制，每个DTLS握手消息都可能被分为数片DTLS记录，每个DTLS握手消息包含一个分片偏移量和一个分片长度。这样，有全部握手消息的接收方能够通过重组，得到原始未分片消息。 
+
+1.6.3 
+重放检测：DTLS支持记录重放检测。实现方式同IPsec AH/ESP相同。通过维护一个接收记录的位图窗口（bitmap window）来实现。太老而不在位图窗口的范围内的记录，已经接收过的记录都将被丢弃。重放检测特性是可选的，既然数据包复制通常不造成大的危，而通常由于路由错误产生。应用程序可以检测到被复制的数据包，并根据此决定传输策略。 
+1.7 同TLS的区别 
+DTLS同TLS非常有很多相同点。因此，DTLS不应该被认为i是一个新协议，而是TLS1.1的系列分支。下面我们没有明确指出的地方，意味着这方面DTLS同TLS1.1是相同的。 
+1.7.1记录层 
+DTLS记录层同TLS1.1非常相似。唯一的改变是在记录中包含了显式序列号。显式序列号允许接收方正确验证TLS MAC。DTLS记录格式如下所示： 
+       struct { 
+        ContentType type; 
+        ProtocolVersion version; 
+        uint16 epoch;               // New field 
+        uint48 sequence_number;       // New field 
+        uint16 length; 
+        opaque fragment[DTLSPlaintext.length]; 
+       } DTLSPlaintext; 
+type：等同于TLS1.1中的type 
+version:DTLS1.0中，version值为{254，255}。该值是DTLS1.0的版本号的补数。这样，就最大化了TLS和DTLS之间的版本号，能很好的区分协议的不同版本。（这样理解，DTLS1.2对应version{254，253}，而TLS1.2对应version{3,2}）。 
+
+epoch：一个计数值，随着每次加密状态改变而递增。 
+sequence_number：该记录的序列号。 
+length：同TLS1.1中的相同。length值不能超过2^14。 
+fragment：同TLS1.1中的一样。 
+
+DTLS在sequence_number值中使用显式而不是隐式序列号。同TLS相同，每次发送ChangeCipherSpec消息之后，序列号置0。 
+
+这里似乎有一个问题，那就是，如果在一个极短的时间段内，发生了几个握手，那么，数据线上传输的许多记录可能会有相同的序列号，但是加密状态不同。epcoh域允许接收方区分这些数据包。epoch初始值为0，随着每次发出ChangeCipherSpec消息而递增。为了保证任意给定的 sequence/epoch 对都是唯一的，实现上不允许在TCP最大分片时间段内出现两次。在TLS中，由于实现了握手可靠性，这不再是一个问题。 
+
+1.7.2 传输层映射 
+每个DTLS记录必须在一个单独的数据报文内。为了避免IP分片，DTLS实现必须检测MTU，发送比MTU小的记录。DTLS实现必须提供一个方法俩检测PMTU（或者最大的应用程序数据包值，即是DTLS载荷的最大值）的值。如果应用程序试图发送一个长度超过MTU的的记录，DTLS实现应该能够产生一个错误，避免该数据包被分片。 
+注意，同IPsec不同，DTLS记录一定不能包含任何关联标志符。应用程序必须负责协商关联性。同UDP假定host/port能够确定应用相似。 
+
+多个DTLS记录可能被放置在一个数据报之内。他们简单的被连续编码，DTLS记录桢能够确定他们之间的边界。注意，数据报载荷的首个字节必须在记录的开始。记录不能越过数据报。 
+
+传输层映射涉及到PMTU发现。该问题目前尚未很好解决。 
+
+1.7.3 记录载荷保护 
+同TLS一样，DTLS传输的数据是一系列被保护的记录。 
+
+1.7.3.1 MAC 
+DTLS MAC铜TLS1.1 MAC相似。当然，使用上，DTLS是显式序列号而非隐式，故该显式序列号可以被用来计算MAC。 
+
+DTLS和TLS在如何处理MAC错误上有所不同。TLS在遇到MAC错误时是终止连接。这个是可行的，因为TLS是建立在可靠的TCP之上的。但是对于UDP上的DTLS就不能这么简单的处理了。通常，DTLS仅仅丢弃MAC出错的数据。如果DTLS实现选择在接收到MAC出错的消息时发送警告，必须发送一个bad_record_mac警告，然后终止连接。 
+
+1.7.3.2 NULL或标准流密钥 
+DTLS NULL密钥实现同TLS1.1中NULL密钥实现完全一样。 
+TLS唯一支持的流密钥是RC4，其不能够被随机访问。DTLS不支持RC4。即DTLS不再支持流密钥。 
+
+1.7.3.3 分组密钥 
+DTLS分组密钥加密和解密的实现同TLS1.1 
+1.7.3.4 
+新的密钥组件在TLS引入新的密钥算法之前，必须在声明中指出其是否适合于DTLS。 
+1.7.3.5 反重放  
+位图窗口机制。 
+2．DTLS握手协议 
+
+DTLS使用TLS相同的握手消息，有下面三个主要的改动 
+1． 添加了无状态cookie交换防止DoS攻击 
+2． 修改了握手头来处理消息丢失，乱序和分片
+3． 使用重传时间来处理消息丢失。 
+除了这些，DTLS格式其他方面都同TLS1.1相同。 
+
+2.1 防止 DoS攻击 
+数据报安全协议最易受许多种DoS攻击。最需要关注的两种攻击是： 
+1． 攻击者通过传输一系列握手初始化请求，导致服务器维护大量状态和处理能力不断消耗，从而耗尽可用服务资源 
+2． 攻击者使用大量跳板机器发送连接初始化信息。服务器然后发送下一条信息（在DTLS中是证书消息，可能非常巨大）给各个跳板机器，然后资源耗尽。 
+
+为了对付这两种攻击。DTLS借鉴了无状态cookie技术（Photuris和IKE中使用）。当client发送ClientHello消息给server之后，server将回复一个HelloVerifyReuqest 消息。client必须重传添加了cookie的ClientHello。server然后验证cookie，如果有效的话才开始进行握手。该机制强迫attacker/client要接受cookie，这使得来自攻击者的伪装IP攻击非常困难。该机制不能防止来自有效IP地址的攻击。交换过程如下所示： 
+
+
+
+         Client                                   Server 
+         ------                                   ------ 
+         ClientHello           ------> 
+
+                               <----- HelloVerifyRequest 
+                                      (contains cookie) 
+
+         ClientHello           ------> 
+         (with cookie) 
+
+         [Rest of handshake] 
+
+
+DTLS修改了ClientHello消息，以能够添加cookie值。 
+
+      struct { 
+        ProtocolVersion client_version; 
+        Random random; 
+        SessionID session_id; 
+        opaque cookie<0..32>;                 // New field 
+        CipherSuite cipher_suites<2..2^16-1>; 
+        CompressionMethod compression_methods<1..2^8-1>; 
+      } ClientHello; 
+
+当第一次发送ClientHello时，client还没有cookie，在此情况下，cookie域为空（cookie = 0x）。 
+HelloVerifyRequest定义如下： 
+      struct { 
+        ProtocolVersion server_version; 
+        opaque cookie<0..32>; 
+      } HelloVerifyRequest; 
+
+作为对HelloVerifyReuqest的回复，client必须使用和第一条ClientHello相同的参数值（version，random，session_id,cipher_suites,compression_method）。server使用这些值来产生cookie和验证cookie接受方的正确身份。sever必须在ServerHello中使用和HelloVerifyRequest相同的版本号。当收到ServerHello消息时，Client必须验证server版本的是否匹配。 
+DTLS应该这样产生cookie，不用保存任何以前的server连接状态也能够验证。一种技术是随机产生秘密,然后产生cookie： cookie = HMAC(secret, Client-IP, Client-Parameters). 
+当接受到第二个ClientHello时，server能够验证cookie是否有效和client是否能够在指定IP地址接收到数据。 
+
+对于该机制的一个可能的攻击是，攻击者从不同地址收集大量cookie，然后重放来攻击server。通过经常更改secret值，使这些cookie变得无效，server可以避免此类攻击。可能会出现这样一种情况，server接收到ClientHello，发送cookie 1给client，然后改变了secret，并重新生成cookie 2，client再次发送携带有cookie 1的ClientHello给server，显然cookie 1 和cookie 2已不匹配，client能被认证么？server采用有限窗口机制来解决此问题。有限窗口内保存未过期的cookie和现在的cookie，server可以接受有限窗口内的cookie。建议给cookie加上版本号，配合来检测这种情况。当然，也可以仅仅验证cookie。 
+当一个新的握手执行时，DTLS server应该实现cookie交换。如果server在这样的环境中，放大攻击是比较容易的，server 应该配置为不实现cookie交换。默认情况下，应该实现cookie交换。另外，当恢复一个会话时，server可能选择不进行cookie交换。但是，无论如何，client必须准备在每一次握手中进行cookie交换。
+如果使用了HelloVerifyRequest，原始的ClientHello和HelloVerifyRequest就不再包含进结束信息的验证数据的计算中。 
+
+2.2 握手消息格式 
+为了支持消息丢失，重传，分片，DTLS修改了TLS1.1握手头： 
+
+struct { 
+        HandshakeType msg_type; 
+        uint24 length; 
+        uint16 message_seq;                              // New field 
+        uint24 fragment_offset;                          // New field 
+        uint24 fragment_length;                          // New field 
+        select (HandshakeType) { 
+      case hello_request: HelloRequest; 
+      case client_hello:  ClientHello; 
+      case hello_verify_request: HelloVerifyRequest;     // New type 
+      case server_hello:  ServerHello; 
+      case certificate:Certificate; 
+      case server_key_exchange: ServerKeyExchange; 
+      case certificate_request: CertificateRequest; 
+      case server_hello_done:ServerHelloDone; 
+      case certificate_verify:  CertificateVerify; 
+      case client_key_exchange: ClientKeyExchange; 
+      case finished:Finished; 
+       } body; 
+      } Handshake; 
+
+每次握手中传输的第一条信息中，message_seq总是为0。每产生一个新消息时，message_seq值按1递增。当重传一条信息时，使用相同的message_seq值。例如 
+
+
+
+
+
+
+
+      Client                             Server 
+      ------                             ------ 
+      ClientHello (seq=0)  ------> 
+
+                              X<-- HelloVerifyRequest (seq=0) 
+                                              (lost) 
+
+      [Timer Expires] 
+
+      ClientHello (seq=0)  ------> 
+      (retransmit) 
+
+                           <------ HelloVerifyRequest (seq=0) 
+
+      ClientHello (seq=1)  ------> 
+      (with cookie) 
+
+                           <------        ServerHello (seq=1) 
+                           <------        Certificate (seq=2) 
+                           <------    ServerHelloDone (seq=3) 
+
+      [消息重传] 
+
+2.3 消息分片和重组 
+前面已经提到，每条DTLS消息必须在一个单独的传输层数据报里边。然而，握手消息通常比最大记录大。因此，DTLS提供了一种机制能够把握手消息分片在多个记录中。 
+当传输握手消息时，发送方把消息分成一系列N个邻近的包。这些包必须小于握手消息的最大尺寸，并且联合起来正好是整个握手消息。这些包不能互相重合。这样，发送方就产生了N个握手消息，都具有同原始握手消息相同的message_seq值。每条新消息都标有fragment_seq和fragment_length值。所有fragment_length值都同原始消息的length值相同。为分片的消息中，fragment_offset=0,fragment_length=length. 
+
+当一个DTLS实现接受到一个握手消息片断时，必须将之缓存起来，直到接收到完整的握手消息。DTLS实现必须能够处理重叠的分片包。这允许发送方重传消息。（通常由MTU发现引起更小的数据分片）。 
+注意，在TLS中多个不同的握手消息可能被包含进相同的DTLS记录中，如果有足够的空间并且这几条消息航程（flight）相同的话。（意思是如果发送方本来是连续发送几条消息，这几条消息就可以合并为一条，比如 serverHello, Certificate, ServerHelloDone）。这样，有两种方式来处理DTLS消息：在相同的记录中火在不同的记录中。 
+
+2.4 超时和重传 
+DTLS消息可以重组为一系列航程（flight）发送，如下图所示。虽然每个航程可能包含多个消息，也应该被看作有相同的超时和重传时间。 
+
+Client                                     Server 
+------                                     ------ 
+ClientHello             -------->                           Flight 1 
+
+                        <-------    HelloVerifyRequest      Flight 2 
+
+ClientHello              -------->                           Flight 3 
+
+                                           ServerHello    \ 
+                                          Certificate*     \ 
+                                 ServerKeyExchange*      Flight 4 
+                                   CertificateRequest*     / 
+                        <--------      ServerHelloDone    / 
+
+Certificate*                                              \ 
+ClientKeyExchange                                          \ 
+CertificateVerify*                                          Flight 5 
+[ChangeCipherSpec]                                         / 
+Finished                -------->                         / 
+
+                                    [ChangeCipherSpec]    \ Flight 6 
+                        <--------             Finished    / 
+
+图1：完整握手的航程            
+
+Client                                           Server 
+------                                           ------ 
+
+ClientHello             -------->                          Flight 1 
+
+                                            ServerHello    \ 
+                                     [ChangeCipherSpec]     Flight 2 
+                         <--------             Finished    / 
+
+[ChangeCipherSpec]                                         \Flight 3 
+Finished                 -------->                         / 
+
+  图2， 会话恢复握手中的消息航程（没有cookie交换）
